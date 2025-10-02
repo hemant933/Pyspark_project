@@ -1,0 +1,147 @@
+# ----------------------------------------
+# 1. Spark Setup
+# ----------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when, isnan, count, avg, max, min, mean
+from pyspark.sql.functions import sum as spark_sum
+from pyspark.sql.functions import udf
+from pyspark.sql.types import DoubleType
+from pyspark.ml.feature import StringIndexer, VectorAssembler
+from pyspark.ml.classification import LogisticRegression, GBTClassifier
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.ml import Pipeline
+
+spark = SparkSession.builder \
+    .appName("HomeCreditDefaultRisk_PySpark") \
+    .getOrCreate()
+
+# ----------------------------------------
+# 2. Load Data
+# ----------------------------------------
+train = spark.read.csv("application_train.csv", header=True, inferSchema=True)
+test = spark.read.csv("application_test.csv", header=True, inferSchema=True)
+
+# Auxiliary tables
+bureau = spark.read.csv("bureau.csv", header=True, inferSchema=True)
+bureau_bal = spark.read.csv("bureau_balance.csv", header=True, inferSchema=True)
+prev = spark.read.csv("previous_application.csv", header=True, inferSchema=True)
+pos = spark.read.csv("POS_CASH_balance.csv", header=True, inferSchema=True)
+inst = spark.read.csv("installments_payments.csv", header=True, inferSchema=True)
+cc = spark.read.csv("credit_card_balance.csv", header=True, inferSchema=True)
+
+print("Train rows:", train.count(), " Test rows:", test.count())
+
+# ----------------------------------------
+# 3. Basic EDA & Cleaning
+# ----------------------------------------
+# Missing values % per column
+def missing_report(df):
+    return df.select(
+        [(count(when(col(c).isNull() | isnan(c), c)) / df.count()).alias(c) for c in df.columns]
+    )
+
+print("Missing values in train:")
+missing_report(train).show()
+
+# Replace nulls: numeric -> 0, categorical -> 'missing'
+train = train.fillna(0)
+test = test.fillna(0)
+
+# Add simple ratio features in main table
+train = train.withColumn("CREDIT_INCOME_RATIO", col("AMT_CREDIT") / (col("AMT_INCOME_TOTAL")+1))
+train = train.withColumn("ANNUITY_INCOME_RATIO", col("AMT_ANNUITY") / (col("AMT_INCOME_TOTAL")+1))
+test = test.withColumn("CREDIT_INCOME_RATIO", col("AMT_CREDIT") / (col("AMT_INCOME_TOTAL")+1))
+test = test.withColumn("ANNUITY_INCOME_RATIO", col("AMT_ANNUITY") / (col("AMT_INCOME_TOTAL")+1))
+
+# ----------------------------------------
+# 4. Feature Engineering - Aggregations
+# ----------------------------------------
+
+# Bureau: aggregate per SK_ID_CURR
+bureau_agg = bureau.groupBy("SK_ID_CURR").agg(
+    avg("AMT_CREDIT_SUM").alias("BUREAU_AVG_CREDIT_SUM"),
+    max("AMT_CREDIT_SUM").alias("BUREAU_MAX_CREDIT_SUM"),
+    avg("AMT_CREDIT_SUM_DEBT").alias("BUREAU_AVG_DEBT"),
+    avg("CREDIT_DAY_OVERDUE").alias("BUREAU_AVG_DAYS_OVERDUE")
+)
+
+# Previous Applications: aggregate
+prev_agg = prev.groupBy("SK_ID_CURR").agg(
+    avg("AMT_APPLICATION").alias("PREV_AVG_AMT_APP"),
+    avg("AMT_CREDIT").alias("PREV_AVG_CREDIT"),
+    avg("HOUR_APPR_PROCESS_START").alias("PREV_AVG_APP_HOUR"),
+    (spark_sum(when(col("NAME_CONTRACT_STATUS")=="Approved", 1).otherwise(0)) /
+     (count("*")+1)).alias("PREV_APPROVAL_RATE")
+)
+
+# Installments: payment behavior
+inst_agg = inst.groupBy("SK_ID_CURR").agg(
+    avg(col("AMT_PAYMENT") - col("AMT_INSTALMENT")).alias("INST_AVG_PAYMENT_DIFF"),
+    avg("DAYS_INSTALMENT").alias("INST_AVG_DUE"),
+    avg("DAYS_ENTRY_PAYMENT").alias("INST_AVG_ENTRY")
+)
+
+# Credit Card balance: utilization
+cc_agg = cc.groupBy("SK_ID_CURR").agg(
+    avg("AMT_BALANCE").alias("CC_AVG_BALANCE"),
+    avg("AMT_DRAWINGS_CURRENT").alias("CC_AVG_DRAWINGS"),
+    avg("AMT_CREDIT_LIMIT_ACTUAL").alias("CC_AVG_LIMIT")
+)
+
+# Merge all engineered features with train/test
+for agg in [bureau_agg, prev_agg, inst_agg, cc_agg]:
+    train = train.join(agg, on="SK_ID_CURR", how="left")
+    test = test.join(agg, on="SK_ID_CURR", how="left")
+
+# Fill again after joins
+train = train.fillna(0)
+test = test.fillna(0)
+
+# ----------------------------------------
+# 5. Preprocessing for ML
+# ----------------------------------------
+label_col = "TARGET"
+
+cat_cols = [f.name for f in train.schema.fields if str(f.dataType) == "StringType" and f.name not in ["SK_ID_CURR"]]
+num_cols = [f.name for f in train.columns if f not in cat_cols + ["SK_ID_CURR", label_col]]
+
+# Index categorical
+indexers = [StringIndexer(inputCol=c, outputCol=c+"_idx", handleInvalid="keep") for c in cat_cols]
+
+# Assemble features
+assembler = VectorAssembler(
+    inputCols=num_cols + [c+"_idx" for c in cat_cols],
+    outputCol="features"
+)
+
+# ----------------------------------------
+# 6. Models
+# ----------------------------------------
+# Logistic Regression
+lr = LogisticRegression(featuresCol="features", labelCol=label_col, maxIter=50)
+
+# Gradient Boosted Trees
+gbt = GBTClassifier(featuresCol="features", labelCol=label_col, maxIter=100, maxDepth=5)
+
+# Choose pipeline (try lr first, then gbt)
+pipeline = Pipeline(stages=indexers + [assembler, gbt])
+
+# Train
+model = pipeline.fit(train)
+
+# ----------------------------------------
+# 7. Evaluation
+# ----------------------------------------
+preds = model.transform(train)
+evaluator = BinaryClassificationEvaluator(labelCol=label_col, metricName="areaUnderROC")
+auc = evaluator.evaluate(preds)
+print("Train AUC:", auc)
+
+# ----------------------------------------
+# 8. Submission
+# ----------------------------------------
+test_preds = model.transform(test)
+submission = test_preds.select(col("SK_ID_CURR"), col("probability").getItem(1).alias("TARGET"))
+
+submission.write.csv("submission.csv", header=True, mode="overwrite")
+print("Submission file saved.")
