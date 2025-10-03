@@ -1,0 +1,113 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col, to_date, substring, translate, regexp_extract,
+    explode, split, concat_ws, array, lit
+)
+
+# -----------------------------
+# 1. Spark Setup
+# -----------------------------
+spark = SparkSession.builder.appName("PySpark_Functions_Demo").getOrCreate()
+
+# Load dataset (change path accordingly)
+df = spark.read.csv("application_train.csv", header=True, inferSchema=True)
+
+# -----------------------------
+# 2. Using PySpark Functions
+# -----------------------------
+
+# Example 1: Convert numeric column to date
+# 'DAYS_BIRTH' is negative days before application (convert to birthdate)
+df1 = df.withColumn("BIRTH_DATE", to_date(lit("2025-01-01")))
+
+# Example 2: Extract substring (first 3 chars of NAME_EDUCATION_TYPE)
+df2 = df1.withColumn("EDU_SUBSTR", substring(col("NAME_EDUCATION_TYPE"), 1, 3))
+
+# Example 3: Translate (replace characters)
+# Replace 'x' and 'y' with 'a' and 'b' in NAME_FAMILY_STATUS
+df3 = df2.withColumn("FAMILY_STATUS_TR", translate(col("NAME_FAMILY_STATUS"), "xy", "ab"))
+
+# Example 4: Regex extract (pull only digits from FLAG_OWN_CAR column)
+df4 = df3.withColumn("CAR_FLAG_NUM", regexp_extract(col("FLAG_OWN_CAR"), r"(\d+)", 1))
+
+# Example 5: Explode (split NAME_INCOME_TYPE into words and expand rows)
+df5 = df4.withColumn("INCOME_WORD", explode(split(col("NAME_INCOME_TYPE"), " ")))
+
+# Example 6: Create array column
+df6 = df5.withColumn("CUSTOM_ARRAY", array("AMT_INCOME_TOTAL", "AMT_CREDIT"))
+
+# Example 7: Concatenate array into string
+df7 = df6.withColumn("INCOME_CREDIT_STR", concat_ws("-", col("CUSTOM_ARRAY")))
+
+# Show transformed data
+df7.select("SK_ID_CURR", "BIRTH_DATE", "EDU_SUBSTR", "FAMILY_STATUS_TR", 
+    "CAR_FLAG_NUM", "INCOME_WORD", "CUSTOM_ARRAY", "INCOME_CREDIT_STR").show(10, truncate=False)
+
+
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col, to_date, substring, translate, regexp_extract,
+    explode, split, concat_ws, array, lit, create_map, map_keys, map_values
+)
+
+# -----------------------------
+# 1. Spark Setup
+# -----------------------------
+spark = SparkSession.builder.appName("PySpark_Functions_Demo").getOrCreate()
+
+# Load dataset
+df = spark.read.csv("application_train.csv", header=True, inferSchema=True)
+
+# -----------------------------
+# 2. Using PySpark Functions
+# -----------------------------
+
+# Example 1: to_date (dummy conversion)
+df1 = df.withColumn("APPLICATION_DATE", to_date(lit("2025-01-01")))
+
+# Example 2: substring
+df2 = df1.withColumn("EDU_SUBSTR", substring(col("NAME_EDUCATION_TYPE"), 1, 3))
+
+# Example 3: translate (replace chars in family status)
+df3 = df2.withColumn("FAMILY_STATUS_TR", translate(col("NAME_FAMILY_STATUS"), "xy", "ab"))
+
+# Example 4: regex_extract (extract digits if present)
+df4 = df3.withColumn("CAR_FLAG_NUM", regexp_extract(col("FLAG_OWN_CAR"), r"(\d+)", 1))
+
+# Example 5: explode + split (split income type into words)
+df5 = df4.withColumn("INCOME_WORD", explode(split(col("NAME_INCOME_TYPE"), " ")))
+
+# Example 6: array (income + credit together)
+df6 = df5.withColumn("CUSTOM_ARRAY", array("AMT_INCOME_TOTAL", "AMT_CREDIT"))
+
+# Example 7: concat_ws (convert array into string)
+df7 = df6.withColumn("INCOME_CREDIT_STR", concat_ws("-", col("CUSTOM_ARRAY")))
+
+# Example 8: create_map (combine columns into a map)
+df8 = df7.withColumn(
+    "CREDIT_MAP",
+    create_map(
+        lit("income"), col("AMT_INCOME_TOTAL"),
+        lit("credit"), col("AMT_CREDIT"),
+        lit("annuity"), col("AMT_ANNUITY")
+    )
+)
+
+# Example 9: map_keys (get map keys)
+df9 = df8.withColumn("MAP_KEYS", map_keys(col("CREDIT_MAP")))
+
+# Example 10: map_values (get map values)
+df10 = df9.withColumn("MAP_VALUES", map_values(col("CREDIT_MAP")))
+
+# -----------------------------
+# 3. Show Results
+# -----------------------------
+df10.select(
+    "SK_ID_CURR", "APPLICATION_DATE", "EDU_SUBSTR", 
+    "FAMILY_STATUS_TR", "CAR_FLAG_NUM", "INCOME_WORD", 
+    "CUSTOM_ARRAY", "INCOME_CREDIT_STR", "CREDIT_MAP",
+    "MAP_KEYS", "MAP_VALUES"
+).show(10, truncate=False)
+
